@@ -9,7 +9,7 @@ PYTHON_BIN=""
 usage() {
   cat <<'EOF'
 Usage:
-  bash run.bash [auto|main|cv|cv-view|mock-cv|win-bridge|win-cv|doctor|test-camera]
+  bash run.bash [auto|main|cv|cv-view|mock-cv|win-bridge|win-cv|win-coord|doctor|test-camera]
 
 Modes:
   auto         Auto-select a runnable node for this machine (default)
@@ -19,6 +19,7 @@ Modes:
   mock-cv      Run with simulated camera (ROS 2 mock + viewer)
   win-bridge   Run TCP bridge for Windows camera sender -> /camera/image_raw
   win-cv       Start Windows bridge + OpenCV viewer (auto-launch sender terminal)
+  win-coord    Coordinate-only mode (no ROS publish, no WSL OpenCV viewer)
   test-camera  Launch camera testing suite
   doctor       Print environment/module checks only
 
@@ -30,10 +31,11 @@ Examples:
   bash run.bash mock-cv
   bash run.bash win-bridge
   bash run.bash win-cv
+  bash run.bash win-coord
   bash run.bash test-camera
   bash run.bash doctor
 
-Windows camera tuning env vars (for win-cv):
+Windows camera tuning env vars (for win-cv / win-coord):
   WIN_CAMERA_FPS     Capture FPS target (default: 30)
   WIN_SEND_HZ        Max TCP send rate (default: 30)
   WIN_JPEG_QUALITY   JPEG quality 1-100 (default: 80)
@@ -44,7 +46,13 @@ Windows camera tuning env vars (for win-cv):
   WIN_BLACK_DETECT_HZ Max detect-point publish rate (default: 8)
   WIN_BLACK_V_MAX    HSV V upper bound for black detection (default: 55)
   WIN_MIN_BLACK_AREA Min contour area for black target (default: 600)
-  WIN_POINT_SCALE_PX_PER_METER Pixel-to-meter scale used by bridge (default: 80.0)
+  WIN_POINT_SCALE_PX_PER_METER Pixel-to-meter scale used by bridge (default: 100.0)
+  WIN_POINT_DEFAULT_Z_M Default output z value in meters (default: 0.0)
+  WIN_XYZ_DECIMALS    Decimals for coordinate tuple output (default: 1)
+  WIN_COORD_FRAME_ID  Output frame label for coordinate mode (default: base_link)
+  WIN_COORD_AXIS_MAPPING Coordinate conversion mode (default: rep103_base_link)
+  WIN_COORD_ONLY_MODE 1/0: make win-cv route to coordinate-only mode (default: 1)
+  WIN_SENDER_COORD_ONLY 1/0: sender skips JPEG frames and sends only coordinates (default: 1)
 EOF
 }
 
@@ -240,7 +248,7 @@ doctor() {
 }
 
 run_main() {
-  check_modules rclpy geometry_msgs.msg sensor_msgs.msg tf2_ros tf2_geometry_msgs
+  check_modules rclpy geometry_msgs.msg sensor_msgs.msg trajectory_msgs.msg tf2_ros tf2_geometry_msgs
   exec "${PYTHON_BIN}" "${SCRIPT_DIR}/main.py"
 }
 
@@ -325,6 +333,7 @@ launch_windows_sender_terminal() {
   local black_detect_hz="${11}"
   local black_v_max="${12}"
   local min_black_area="${13}"
+  local sender_coord_only="${14:-0}"
 
   if ! command -v cmd.exe >/dev/null 2>&1; then
     warn "cmd.exe is unavailable. Open Windows terminal manually to run windows_camera_ros_sender.py"
@@ -368,12 +377,18 @@ launch_windows_sender_terminal() {
       ;;
   esac
 
+  case "${sender_coord_only,,}" in
+    1|true|yes|on)
+      sender_cmd+=(--coord-only)
+      ;;
+  esac
+
   "${sender_cmd[@]}" >/dev/null 2>&1
 }
 
 run_win_bridge() {
   local bridge_port="${WIN_BRIDGE_PORT:-5001}"
-  local point_scale_px_per_meter="${WIN_POINT_SCALE_PX_PER_METER:-80.0}"
+  local point_scale_px_per_meter="${WIN_POINT_SCALE_PX_PER_METER:-100.0}"
 
   if [[ "${point_scale_px_per_meter}" =~ ^[+-]?[0-9]+$ ]]; then
     point_scale_px_per_meter="${point_scale_px_per_meter}.0"
@@ -394,6 +409,15 @@ run_win_bridge() {
 }
 
 run_win_cv() {
+  local win_coord_only_mode="${WIN_COORD_ONLY_MODE:-1}"
+  case "${win_coord_only_mode,,}" in
+    1|true|yes|on)
+      log "WIN_COORD_ONLY_MODE enabled, routing win-cv -> win-coord"
+      run_win_coord
+      return
+      ;;
+  esac
+
   local preferred_port="${WIN_BRIDGE_PORT:-5001}"
   local bridge_port="${preferred_port}"
   local sender_host="127.0.0.1"
@@ -408,7 +432,7 @@ run_win_cv() {
   local black_detect_hz="${WIN_BLACK_DETECT_HZ:-8}"
   local black_v_max="${WIN_BLACK_V_MAX:-55}"
   local min_black_area="${WIN_MIN_BLACK_AREA:-600}"
-  local point_scale_px_per_meter="${WIN_POINT_SCALE_PX_PER_METER:-80.0}"
+  local point_scale_px_per_meter="${WIN_POINT_SCALE_PX_PER_METER:-100.0}"
 
   if [[ "${point_scale_px_per_meter}" =~ ^[+-]?[0-9]+$ ]]; then
     point_scale_px_per_meter="${point_scale_px_per_meter}.0"
@@ -447,7 +471,7 @@ run_win_cv() {
 
   log "Bridge is running (PID: ${BRIDGE_PID})"
   log "Trying to launch Windows sender terminal..."
-  if ! launch_windows_sender_terminal "${sender_host}" "${bridge_port}" "${camera_index}" "${camera_fps}" "${sender_hz}" "${camera_width}" "${camera_height}" "${jpeg_quality}" "${sender_preview}" "${detect_black}" "${black_detect_hz}" "${black_v_max}" "${min_black_area}"; then
+  if ! launch_windows_sender_terminal "${sender_host}" "${bridge_port}" "${camera_index}" "${camera_fps}" "${sender_hz}" "${camera_width}" "${camera_height}" "${jpeg_quality}" "${sender_preview}" "${detect_black}" "${black_detect_hz}" "${black_v_max}" "${min_black_area}" "0"; then
     local win_dir
     local preview_arg=""
     local detect_black_arg=""
@@ -468,6 +492,100 @@ run_win_cv() {
   fi
 
   "${PYTHON_BIN}" "${SCRIPT_DIR}/camera_point_cv_subscriber.py"
+}
+
+run_win_coord() {
+  local preferred_port="${WIN_BRIDGE_PORT:-5001}"
+  local bridge_port="${preferred_port}"
+  local sender_host="127.0.0.1"
+  local camera_index="${WIN_CAMERA_INDEX:-0}"
+  local camera_fps="${WIN_CAMERA_FPS:-30}"
+  local sender_hz="${WIN_SEND_HZ:-30}"
+  local camera_width="${WIN_CAMERA_WIDTH:-960}"
+  local camera_height="${WIN_CAMERA_HEIGHT:-540}"
+  local jpeg_quality="${WIN_JPEG_QUALITY:-80}"
+  local sender_preview="${WIN_SENDER_PREVIEW:-1}"
+  local detect_black="${WIN_DETECT_BLACK:-0}"
+  local black_detect_hz="${WIN_BLACK_DETECT_HZ:-8}"
+  local black_v_max="${WIN_BLACK_V_MAX:-55}"
+  local min_black_area="${WIN_MIN_BLACK_AREA:-600}"
+  local sender_coord_only="${WIN_SENDER_COORD_ONLY:-1}"
+  local point_scale_px_per_meter="${WIN_POINT_SCALE_PX_PER_METER:-100.0}"
+  local point_default_z_m="${WIN_POINT_DEFAULT_Z_M:-0.0}"
+  local xyz_decimals="${WIN_XYZ_DECIMALS:-1}"
+  local coord_frame_id="${WIN_COORD_FRAME_ID:-base_link}"
+  local coord_axis_mapping="${WIN_COORD_AXIS_MAPPING:-rep103_base_link}"
+
+  if [[ "${point_scale_px_per_meter}" =~ ^[+-]?[0-9]+$ ]]; then
+    point_scale_px_per_meter="${point_scale_px_per_meter}.0"
+  fi
+  if [[ "${point_default_z_m}" =~ ^[+-]?[0-9]+$ ]]; then
+    point_default_z_m="${point_default_z_m}.0"
+  fi
+
+  if [[ ! -f "${SCRIPT_DIR}/windows_coordinate_bridge.py" ]]; then
+    fail "windows_coordinate_bridge.py not found"
+  fi
+
+  if tcp_port_in_use "${bridge_port}"; then
+    local fallback_port
+    fallback_port="$(pick_free_tcp_port $((preferred_port + 1)) 50 || true)"
+    if [[ -z "${fallback_port}" ]]; then
+      fail "TCP port ${preferred_port} is busy and no fallback port was found. Stop stale bridge processes and retry."
+    fi
+    warn "Port ${preferred_port} is in use. Switching to ${fallback_port}."
+    bridge_port="${fallback_port}"
+  fi
+
+  log "Starting coordinate-only bridge on 0.0.0.0:${bridge_port}..."
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/windows_coordinate_bridge.py" \
+    --host "0.0.0.0" \
+    --port "${bridge_port}" \
+    --scale-px-per-meter "${point_scale_px_per_meter}" \
+    --default-z-m "${point_default_z_m}" \
+    --xyz-decimals "${xyz_decimals}" \
+    --frame-id "${coord_frame_id}" \
+    --axis-mapping "${coord_axis_mapping}" &
+  COORD_PID=$!
+
+  sleep 1
+  if ! kill -0 ${COORD_PID} 2>/dev/null; then
+    fail "Coordinate-only bridge failed to start"
+  fi
+
+  trap "kill ${COORD_PID} 2>/dev/null || true" EXIT
+
+  log "Coordinate bridge is running (PID: ${COORD_PID})"
+  log "Coordinate output format: source/frame/(x y z) in separate lines"
+  log "Coordinate mapping: frame=${coord_frame_id} axis_mapping=${coord_axis_mapping}"
+  log "Trying to launch Windows sender terminal..."
+  if ! launch_windows_sender_terminal "${sender_host}" "${bridge_port}" "${camera_index}" "${camera_fps}" "${sender_hz}" "${camera_width}" "${camera_height}" "${jpeg_quality}" "${sender_preview}" "${detect_black}" "${black_detect_hz}" "${black_v_max}" "${min_black_area}" "${sender_coord_only}"; then
+    local win_dir
+    local preview_arg=""
+    local detect_black_arg=""
+    local coord_only_arg=""
+    case "${sender_preview,,}" in
+      1|true|yes|on)
+        preview_arg=" --preview"
+        ;;
+    esac
+    case "${detect_black,,}" in
+      1|true|yes|on)
+        detect_black_arg=" --detect-black --black-detect-hz ${black_detect_hz} --black-v-max ${black_v_max} --min-black-area ${min_black_area}"
+        ;;
+    esac
+    case "${sender_coord_only,,}" in
+      1|true|yes|on)
+        coord_only_arg=" --coord-only"
+        ;;
+    esac
+    win_dir="$(wslpath -w "${SCRIPT_DIR}" 2>/dev/null || echo "C:\\Users\\<user>\\Downloads\\OpenCV_ROS\\OpenCV_ROS")"
+    warn "Failed to auto-launch Windows sender. Run these commands in Windows terminal:"
+    echo "  cd /d \"${win_dir}\""
+    echo "  python windows_camera_ros_sender.py --host ${sender_host} --port ${bridge_port} --index ${camera_index} --fps ${camera_fps} --send-hz ${sender_hz} --width ${camera_width} --height ${camera_height} --jpeg-quality ${jpeg_quality}${preview_arg}${detect_black_arg}${coord_only_arg}"
+  fi
+
+  wait ${COORD_PID}
 }
 
 run_test_camera() {
@@ -501,7 +619,7 @@ case "${TARGET}" in
     usage
     exit 0
     ;;
-  auto|main|cv|cv-view|mock-cv|win-bridge|win-cv|doctor|test-camera)
+  auto|main|cv|cv-view|mock-cv|win-bridge|win-cv|win-coord|doctor|test-camera)
     ;;
   *)
     usage
@@ -510,7 +628,22 @@ case "${TARGET}" in
 esac
 
 pick_python
-source_ros_env
+NEEDS_ROS=1
+if [[ "${TARGET}" == "win-coord" ]]; then
+  NEEDS_ROS=0
+fi
+if [[ "${TARGET}" == "win-cv" ]]; then
+  win_coord_only_mode_value="${WIN_COORD_ONLY_MODE:-1}"
+  case "${win_coord_only_mode_value,,}" in
+    1|true|yes|on)
+      NEEDS_ROS=0
+      ;;
+  esac
+fi
+
+if [[ ${NEEDS_ROS} -eq 1 ]]; then
+  source_ros_env
+fi
 
 if [[ "${TARGET}" == "doctor" ]]; then
   doctor
@@ -544,6 +677,10 @@ fi
 
 if [[ "${TARGET}" == "win-cv" ]]; then
   run_win_cv
+fi
+
+if [[ "${TARGET}" == "win-coord" ]]; then
+  run_win_coord
 fi
 
 if [[ "${TARGET}" == "test-camera" ]]; then

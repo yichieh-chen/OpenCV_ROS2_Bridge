@@ -21,6 +21,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from ros_image_codec import cv_frame_to_image_msg
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 
 
 class WindowsStreamBridgePublisher(Node):
@@ -32,15 +33,24 @@ class WindowsStreamBridgePublisher(Node):
         self.declare_parameter("publish_topic", "/camera/image_raw")
         self.declare_parameter("point_topic", "/camera/object_point")
         self.declare_parameter("frame_id", "camera_frame")
+        self.declare_parameter("bridge_control_topic", "/camera/bridge_control")
+        self.declare_parameter("enable_publish_fps_log", True)
         self.declare_parameter("max_frame_bytes", 4_000_000)
         self.declare_parameter("max_control_bytes", 4096)
-        self.declare_parameter("scale_px_per_meter", 80.0)
+        self.declare_parameter("scale_px_per_meter", 100.0)
+        self.declare_parameter("default_z_m", 0.0)
 
         self.listen_host = self.get_parameter("listen_host").get_parameter_value().string_value
         self.listen_port = self.get_parameter("listen_port").get_parameter_value().integer_value
         self.publish_topic = self.get_parameter("publish_topic").get_parameter_value().string_value
         self.point_topic = self.get_parameter("point_topic").get_parameter_value().string_value
         self.frame_id = self.get_parameter("frame_id").get_parameter_value().string_value
+        self.bridge_control_topic = (
+            self.get_parameter("bridge_control_topic").get_parameter_value().string_value
+        )
+        self.enable_publish_fps_log = (
+            self.get_parameter("enable_publish_fps_log").get_parameter_value().bool_value
+        )
         self.max_frame_bytes = self.get_parameter("max_frame_bytes").get_parameter_value().integer_value
         self.max_control_bytes = (
             self.get_parameter("max_control_bytes").get_parameter_value().integer_value
@@ -48,13 +58,14 @@ class WindowsStreamBridgePublisher(Node):
         self.scale_px_per_meter = (
             self.get_parameter("scale_px_per_meter").get_parameter_value().double_value
         )
+        self.default_z_m = self.get_parameter("default_z_m").get_parameter_value().double_value
 
         if self.max_frame_bytes <= 1024:
             self.max_frame_bytes = 4_000_000
         if self.max_control_bytes <= 64:
             self.max_control_bytes = 4096
         if self.scale_px_per_meter <= 0.0:
-            self.scale_px_per_meter = 80.0
+            self.scale_px_per_meter = 100.0
 
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -63,6 +74,12 @@ class WindowsStreamBridgePublisher(Node):
         )
         self.publisher = self.create_publisher(Image, self.publish_topic, image_qos)
         self.point_publisher = self.create_publisher(PointStamped, self.point_topic, 10)
+        self.bridge_control_subscription = self.create_subscription(
+            String,
+            self.bridge_control_topic,
+            self.bridge_control_callback,
+            10,
+        )
 
         self.total_frames = 0
         self.window_frames = 0
@@ -74,8 +91,29 @@ class WindowsStreamBridgePublisher(Node):
             f"  listen: {self.listen_host}:{self.listen_port}\n"
             f"  publish: {self.publish_topic}\n"
             f"  point: {self.point_topic}\n"
-            f"  frame_id: {self.frame_id}"
+            f"  frame_id: {self.frame_id}\n"
+            f"  control: {self.bridge_control_topic}\n"
+            f"  publish_fps_log: {self.enable_publish_fps_log}"
         )
+
+    def bridge_control_callback(self, msg: String) -> None:
+        command = msg.data.strip().lower()
+        if command in ("fps_log_off", "publish_fps_off", "publishing_fps_off"):
+            self.enable_publish_fps_log = False
+            self.get_logger().info("Publishing FPS log disabled by control command.")
+            return
+
+        if command in ("fps_log_on", "publish_fps_on", "publishing_fps_on"):
+            self.enable_publish_fps_log = True
+            self.get_logger().info("Publishing FPS log enabled by control command.")
+            return
+
+        if command in ("fps_log_toggle", "publish_fps_toggle", "publishing_fps_toggle"):
+            self.enable_publish_fps_log = not self.enable_publish_fps_log
+            self.get_logger().info(
+                f"Publishing FPS log toggled to {self.enable_publish_fps_log}."
+            )
+            return
 
     def _recv_exact(self, conn: socket.socket, size: int) -> bytes | None:
         chunks: list[bytes] = []
@@ -114,12 +152,15 @@ class WindowsStreamBridgePublisher(Node):
 
         now = time.monotonic()
         elapsed = now - self.window_started
-        if elapsed >= 1.0:
+        if self.enable_publish_fps_log and elapsed >= 1.0:
             fps = self.window_frames / elapsed
             h, w = frame.shape[:2]
             self.get_logger().info(
                 f"Publishing {w}x{h} on {self.publish_topic} fps={fps:.2f} total={self.total_frames}"
             )
+            self.window_started = now
+            self.window_frames = 0
+        elif elapsed >= 1.0:
             self.window_started = now
             self.window_frames = 0
 
@@ -145,7 +186,7 @@ class WindowsStreamBridgePublisher(Node):
         point_msg.header.frame_id = self.frame_id
         point_msg.point.x = float(x_m)
         point_msg.point.y = float(y_m)
-        point_msg.point.z = 0.0
+        point_msg.point.z = float(self.default_z_m)
         self.point_publisher.publish(point_msg)
 
         now = time.monotonic()
@@ -153,7 +194,7 @@ class WindowsStreamBridgePublisher(Node):
             self.last_point_log_time = now
             self.get_logger().info(
                 f"Published {source} point px=({x_px},{y_px}) -> "
-                f"x={x_m:+.3f}m y={y_m:+.3f}m on {self.point_topic}"
+                f"(X y z) ({x_m:.1f} {y_m:.1f} {self.default_z_m:.1f}) on {self.point_topic}"
             )
 
     def _handle_control_payload(self, payload: bytes) -> None:

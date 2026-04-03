@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture frames on Windows and send them to WSL ROS bridge over TCP.
+"""Capture frames on Windows and send them to WSL bridge over TCP.
 
 Protocol:
 	Frame packet:   [4-byte big-endian length][JPEG payload]
@@ -185,7 +185,7 @@ def _detect_black_object(
 
 
 def main() -> int:
-	parser = argparse.ArgumentParser(description="Windows camera sender for WSL ROS bridge")
+	parser = argparse.ArgumentParser(description="Windows camera sender for WSL bridge")
 	parser.add_argument("--host", default="127.0.0.1", help="bridge host (default: 127.0.0.1)")
 	parser.add_argument("--port", type=int, default=5001, help="bridge port (default: 5001)")
 	parser.add_argument("--index", type=int, default=0, help="camera index (default: 0)")
@@ -201,6 +201,11 @@ def main() -> int:
 	parser.add_argument("--reconnect-seconds", type=float, default=2.0, help="reconnect backoff")
 	parser.add_argument("--connect-timeout", type=float, default=5.0, help="socket connect timeout")
 	parser.add_argument("--duration-seconds", type=float, default=0.0, help="0 means run forever")
+	parser.add_argument(
+		"--coord-only",
+		action="store_true",
+		help="send only coordinate control packets, skip JPEG frame packets",
+	)
 	parser.add_argument("--detect-black", action="store_true", help="enable black object detection")
 	parser.add_argument(
 		"--black-detect-hz",
@@ -227,6 +232,7 @@ def main() -> int:
 		return 0 if found else 1
 
 	jpeg_quality = int(min(100, max(1, args.jpeg_quality)))
+	coord_only_mode = bool(args.coord_only)
 	send_hz = float(args.send_hz)
 	if send_hz <= 0.0:
 		send_hz = float(max(1, args.fps))
@@ -265,6 +271,9 @@ def main() -> int:
 	else:
 		test_frames = _test_pattern_frames(args.width, args.height, args.fps)
 		print("[sender] Using synthetic test pattern source")
+
+	if coord_only_mode:
+		print("[sender] Coordinate-only mode ON (JPEG frame packets disabled)")
 
 	if preview_enabled:
 		try:
@@ -350,28 +359,29 @@ def main() -> int:
 					min_black_area=min_black_area,
 				)
 
-			ok, encoded = cv2.imencode(
-				".jpg",
-				frame,
-				[int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality],
-			)
-			if not ok:
-				print("[sender][warn] JPEG encode failed")
-				continue
+			if not coord_only_mode:
+				ok, encoded = cv2.imencode(
+					".jpg",
+					frame,
+					[int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality],
+				)
+				if not ok:
+					print("[sender][warn] JPEG encode failed")
+					continue
 
-			payload = encoded.tobytes()
-			packet = struct.pack("!I", len(payload)) + payload
+				payload = encoded.tobytes()
+				packet = struct.pack("!I", len(payload)) + payload
 
-			try:
-				sock.sendall(packet)
-			except OSError as exc:
-				print(f"[sender][warn] Send failed: {exc}; reconnecting...")
 				try:
-					sock.close()
-				except OSError:
-					pass
-				sock = None
-				continue
+					sock.sendall(packet)
+				except OSError as exc:
+					print(f"[sender][warn] Send failed: {exc}; reconnecting...")
+					try:
+						sock.close()
+					except OSError:
+						pass
+					sock = None
+					continue
 
 			while pending_clicks:
 				click_x, click_y, click_w, click_h = pending_clicks.pop(0)
@@ -388,7 +398,7 @@ def main() -> int:
 				try:
 					sock.sendall(click_packet)
 					print(
-						f"[sender] Click sent -> /camera/object_point "
+						f"[sender] Click coordinate sent "
 						f"px=({click_x},{click_y})"
 					)
 				except OSError as exc:
@@ -442,7 +452,7 @@ def main() -> int:
 				)
 				cv2.putText(
 					preview,
-					"Left click: publish /camera/object_point",
+					"Left click: send coordinate packet",
 					(12, 56),
 					cv2.FONT_HERSHEY_SIMPLEX,
 					0.6,

@@ -1,15 +1,17 @@
 # OpenCV_ROS
 
-ROS 2 + OpenCV camera integration project with two runtime paths:
+ROS 2 + OpenCV camera integration project with runtime paths:
 
 1. Linux/WSL camera pipeline using local camera nodes.
 2. Windows camera capture pipeline using TCP bridge to ROS topics in WSL.
+3. Coordinate-only pipeline using Windows sender + WSL TCP coordinate bridge (no ROS publish).
 
 This repository is prepared for GitHub publication with Docker packaging, runtime scripts, and operational documentation.
 
 ## Current Project Status
 
 - ROS 2 runtime scripts are available in `run.bash` (`doctor`, `cv`, `cv-view`, `mock-cv`, `win-bridge`, `win-cv`).
+- Coordinate-only runtime is available in `run.bash win-coord` (no ROS topic output).
 - Windows sender to WSL bridge pipeline is implemented.
 - Click-to-point publishing to `/camera/object_point` is implemented.
 - Optional black-object tracking in Windows preview is implemented (toggle key `B`, optional startup flag).
@@ -24,6 +26,7 @@ This repository is prepared for GitHub publication with Docker packaging, runtim
   - optional black-object detection
   - preview overlay and target bounding box
 - WSL bridge publisher with point conversion (`scale_px_per_meter`).
+- WSL coordinate-only bridge with tuple output format `(X y z) (0.0 0.0 0.0)`.
 - Mock camera mode for development without physical camera.
 
 ## Repository Layout
@@ -31,6 +34,7 @@ This repository is prepared for GitHub publication with Docker packaging, runtim
 - `run.bash`: main launcher.
 - `windows_camera_ros_sender.py`: Windows capture and TCP sender.
 - `windows_stream_bridge_publisher.py`: TCP bridge to ROS Image and PointStamped.
+- `windows_coordinate_bridge.py`: TCP bridge that outputs coordinates only (no ROS publish).
 - `camera_point_cv_subscriber.py`: OpenCV viewer and point overlay.
 - `usb_camera_publisher.py`: local USB camera ROS publisher.
 - `mock_camera_publisher.py`: synthetic test camera source.
@@ -46,7 +50,26 @@ source /opt/ros/jazzy/setup.bash
 bash run.bash doctor
 ```
 
-### 2. Windows bridge mode
+### 2. Coordinate-only mode (no ROS publish)
+
+WSL terminal:
+
+```bash
+bash run.bash win-coord
+```
+
+Windows sender is auto-launched when possible.
+Coordinate output is printed in WSL as multiline blocks:
+
+```text
+source: click
+frame: base_link
+(x y z): (0.0 0.0 0.0)
+```
+
+Default axis mapping follows REP103 `base_link` (x forward, y left, z up) with top-view camera assumption.
+
+### 3. Windows ROS bridge mode
 
 WSL terminal A:
 
@@ -119,9 +142,6 @@ Runtime controls in preview window:
 ## Related Docs
 
 - `DOCKER.md`
-- `PROJECT_STATUS_GITHUB.md`
-- `GITHUB_UPLOAD_CHECKLIST.md`
-- `README_CAMERA_INTEGRATION.md`
 
 ## License
 

@@ -20,11 +20,7 @@ WORKDIR /workspace/OpenCV_ROS
 COPY . /workspace/OpenCV_ROS
 
 RUN chmod +x /workspace/OpenCV_ROS/run.bash \
-    && chmod +x /workspace/OpenCV_ROS/setup.bash \
-    && chmod +x /workspace/OpenCV_ROS/quickstart.bash \
-    && chmod +x /workspace/OpenCV_ROS/run_camera_demo.sh \
     && chmod +x /workspace/OpenCV_ROS/test_camera.bash \
-    && chmod +x /workspace/OpenCV_ROS/verify_camera.bash \
     && chmod +x /workspace/OpenCV_ROS/docker/entrypoint.sh
 
 ENTRYPOINT ["/workspace/OpenCV_ROS/docker/entrypoint.sh"]
